@@ -1,4 +1,4 @@
-const { useState, useEffect } = React;
+const { useState, useEffect, useRef } = React;
 const { createRoot } = ReactDOM;
 
 // Simple Navigation Component
@@ -37,13 +37,11 @@ const HomePage = () => {
   const [scaleData, setScaleData] = useState({});
   const [statusIcon, setStatusIcon] = useState('green');
 
-  // Update battery status every 5 seconds using /api/status endpoint
   useEffect(() => {
     const interval = setInterval(() => {
       fetch('/api/status')
         .then((res) => res.json())
         .then((data) => {
-          // Using battery voltage (in V) to determine status
           if (data.battery < 3.1) {
             setStatusIcon('red');
           } else {
@@ -68,17 +66,10 @@ const HomePage = () => {
     margin: 'auto',
   };
 
-  const statusStyle = {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '10px',
-    marginBottom: '15px',
-  };
-
   return (
     <div style={containerStyle}>
       <h1>ESP NOW Weight Scale</h1>
-      <div style={statusStyle}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '15px' }}>
         <span style={{ fontSize: '24px' }}>
           {statusIcon === 'green' ? '🟢' : '🔴'}
         </span>
@@ -117,27 +108,63 @@ const HomePage = () => {
   );
 };
 
-// Battery Monitor Page Component
+// Battery Monitor Page Component with live chart of rom_phy_get_vdd33 values
 const BatteryPage = () => {
-  const [batteryVoltage, setBatteryVoltage] = useState(null);
-  const [history, setHistory] = useState([]);
+  const [currentRom, setCurrentRom] = useState(null);
+  const chartRef = useRef(null);
+  const chartInstance = useRef(null);
 
-  // Fetch battery voltage from /vcc endpoint every second
   useEffect(() => {
+    // Create chart instance
+    const ctx = chartRef.current.getContext('2d');
+    chartInstance.current = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [{
+          label: 'rom_phy_get_vdd33',
+          data: [],
+          borderColor: 'blue',
+          fill: false,
+        }]
+      },
+      options: {
+        animation: false,
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+          x: { display: false }
+        }
+      }
+    });
+
+    // Poll /api/status every second to update ROM value
     const interval = setInterval(() => {
-      fetch('/vcc')
-        .then((res) => res.text())
-        .then((txt) => {
-          const voltage = parseInt(txt, 10) / 1000; // convert mV to V
-          setBatteryVoltage(voltage);
-          setHistory((prev) => {
-            const newHistory = [...prev, voltage];
-            return newHistory.slice(-20); // keep last 20 readings
-          });
+      fetch('/api/status')
+        .then((res) => res.json())
+        .then((data) => {
+          const newValue = data.rom_phy_get_vdd33;
+          setCurrentRom(newValue);
+          if (chartInstance.current) {
+            const chart = chartInstance.current;
+            const now = new Date().toLocaleTimeString();
+            chart.data.labels.push(now);
+            chart.data.datasets[0].data.push(newValue);
+            // Keep only last 20 data points
+            if (chart.data.labels.length > 20) {
+              chart.data.labels.shift();
+              chart.data.datasets[0].data.shift();
+            }
+            chart.update();
+          }
         })
-        .catch((err) => console.error('Error fetching VCC:', err));
+        .catch((err) => console.error(err));
     }, 1000);
-    return () => clearInterval(interval);
+
+    return () => {
+      clearInterval(interval);
+      if (chartInstance.current) chartInstance.current.destroy();
+    };
   }, []);
 
   const containerStyle = {
@@ -145,64 +172,88 @@ const BatteryPage = () => {
     flexDirection: 'column',
     alignItems: 'center',
     padding: '20px',
-    backgroundColor: '#f5f5f5',
+    backgroundColor: '#fff',
     borderRadius: '10px',
     boxShadow: '0 0 10px rgba(0,0,0,0.2)',
-    maxWidth: '500px',
+    maxWidth: '600px',
     margin: 'auto',
   };
+  const canvasStyle = { width: '100%', height: '300px' };
 
   return (
     <div style={containerStyle}>
       <h1>Battery Monitor</h1>
-      <p style={{ fontSize: '20px' }}>
-        Current Voltage: {batteryVoltage !== null ? batteryVoltage.toFixed(3) + ' V' : 'Loading...'}
-      </p>
-      <h3>Recent Readings</h3>
-      <ul style={{ listStyle: 'none', padding: 0 }}>
-        {history.map((v, index) => (
-          <li key={index} style={{ margin: '3px 0' }}>
-            {v.toFixed(3)} V
-          </li>
-        ))}
-      </ul>
+      <p>Current ROM VDD33: {currentRom !== null ? currentRom : 'Loading...'}</p>
+      <div style={{ width: '100%', marginTop: '20px' }}>
+        <canvas ref={chartRef} style={canvasStyle} />
+      </div>
     </div>
   );
 };
 
-// Calibration Page Component
+// Calibration Page Component with live raw value updates and plotting
 const CalibratePage = () => {
-  const [calData, setCalData] = useState({
-    raw_value: null,
-    current_scale: '',
-    current_offset: '',
-  });
+  const [calData, setCalData] = useState({ raw_value: null, current_scale: '', current_offset: '' });
   const [newScale, setNewScale] = useState('');
   const [newOffset, setNewOffset] = useState('');
   const [rawSim, setRawSim] = useState('');
   const [simulatedWeight, setSimulatedWeight] = useState(null);
   const [message, setMessage] = useState('');
+  const chartRef = useRef(null);
+  const chartInstance = useRef(null);
 
-  // Function to refresh calibration data from /api/scale/raw
+  // Poll calibration endpoint every second and update chart with raw_value
   const fetchCalibration = () => {
     fetch('/api/scale/raw')
       .then((res) => res.json())
       .then((data) => {
         setCalData(data);
-        setNewScale(data.current_scale);
-        setNewOffset(data.current_offset);
+        if (newScale === '') setNewScale(data.current_scale);
+        if (newOffset === '') setNewOffset(data.current_offset);
+        if (chartInstance.current) {
+          const now = new Date().toLocaleTimeString();
+          chartInstance.current.data.labels.push(now);
+          chartInstance.current.data.datasets[0].data.push(data.raw_value);
+          if (chartInstance.current.data.labels.length > 20) {
+            chartInstance.current.data.labels.shift();
+            chartInstance.current.data.datasets[0].data.shift();
+          }
+          chartInstance.current.update();
+        }
       })
       .catch((err) => console.error('Error fetching calibration:', err));
   };
 
   useEffect(() => {
-    fetchCalibration();
+    const ctx = chartRef.current.getContext('2d');
+    chartInstance.current = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [{
+          label: 'Raw Value',
+          data: [],
+          borderColor: 'green',
+          fill: false,
+        }]
+      },
+      options: {
+        animation: false,
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: { x: { display: false } }
+      }
+    });
+    const interval = setInterval(fetchCalibration, 1000);
+    return () => {
+      clearInterval(interval);
+      if (chartInstance.current) chartInstance.current.destroy();
+    };
   }, []);
 
-  // Simulation: weight (kg) = (rawSim - offset) / scale
+  // Simulation: weight (in grams) = (raw input - offset) / scale
   const simulateWeight = (raw, scale, offset) => {
     if (!raw || !scale || !offset) return null;
-    // Convert to number and compute simulated weight.
     const r = parseFloat(raw);
     const s = parseFloat(scale);
     const o = parseFloat(offset);
@@ -215,7 +266,6 @@ const CalibratePage = () => {
     setSimulatedWeight(sim);
   }, [rawSim, newScale, newOffset]);
 
-  // Handlers for tare, set calibration, and save
   const handleTare = () => {
     fetch('/api/scale/tare')
       .then((res) => res.text())
@@ -227,7 +277,6 @@ const CalibratePage = () => {
   };
 
   const handleSetCalibration = () => {
-    // Validate newScale is non-zero.
     if (parseFloat(newScale) === 0) {
       setMessage("Invalid scale value");
       return;
@@ -253,11 +302,19 @@ const CalibratePage = () => {
     flexDirection: 'column',
     alignItems: 'center',
     padding: '20px',
-    backgroundColor: '#f5f5f5',
+    backgroundColor: '#fff',
     borderRadius: '10px',
     boxShadow: '0 0 10px rgba(0,0,0,0.2)',
-    maxWidth: '600px',
+    maxWidth: '800px',
     margin: 'auto',
+  };
+
+  const sectionStyle = {
+    width: '100%',
+    marginBottom: '20px',
+    padding: '10px',
+    border: '1px solid #ddd',
+    borderRadius: '5px',
   };
 
   const inputStyle = {
@@ -281,19 +338,25 @@ const CalibratePage = () => {
     width: '100%',
   };
 
+  const canvasStyle = { width: '100%', height: '300px' };
+
   return (
     <div style={containerStyle}>
       <h1>Calibration</h1>
-      <div style={{ width: '100%', marginBottom: '15px' }}>
-        <h3>Current Calibration Values</h3>
+      
+      <div style={sectionStyle}>
+        <h2>Current Calibration Values</h2>
         <p><strong>Raw Value:</strong> {calData.raw_value !== null ? calData.raw_value : 'Loading...'}</p>
         <p><strong>Scale:</strong> {calData.current_scale}</p>
         <p><strong>Offset:</strong> {calData.current_offset}</p>
+        <p style={{ color: 'red', fontSize: '12px' }}>
+          Warning: Changing calibration values and saving will overwrite the calibration data stored in the ESP's EEPROM.
+        </p>
         <button style={buttonStyle} onClick={fetchCalibration}>Refresh Calibration Data</button>
       </div>
 
-      <div style={{ width: '100%', marginBottom: '15px' }}>
-        <h3>Edit Calibration Values</h3>
+      <div style={sectionStyle}>
+        <h2>Edit Calibration</h2>
         <label>Scale:</label>
         <input
           style={inputStyle}
@@ -313,11 +376,9 @@ const CalibratePage = () => {
         <button style={buttonStyle} onClick={handleSaveCalibration}>Save Calibration</button>
       </div>
 
-      <div style={{ width: '100%', marginBottom: '15px' }}>
-        <h3>Calibration Simulator</h3>
-        <p>
-          Simulated weight (kg) = (Raw Input - Offset) / Scale
-        </p>
+      <div style={sectionStyle}>
+        <h2>Calibration Simulator</h2>
+        <p>Simulated Weight (g) = (Raw Input - Offset) / Scale</p>
         <label>Raw Input Value:</label>
         <input
           style={inputStyle}
@@ -326,9 +387,17 @@ const CalibratePage = () => {
           onChange={(e) => setRawSim(e.target.value)}
         />
         <p>
-          Simulated Weight: {simulatedWeight !== null ? simulatedWeight + ' kg' : 'Enter raw value'}
+          Simulated Weight: {simulatedWeight !== null ? simulatedWeight + ' g' : 'Enter raw value'}
         </p>
       </div>
+
+      <div style={sectionStyle}>
+        <h2>Live Raw Value Plot</h2>
+        <div style={{ width: '100%', marginTop: '10px' }}>
+          <canvas ref={chartRef} style={canvasStyle} />
+        </div>
+      </div>
+
       {message && (
         <div style={{ backgroundColor: '#e0e0e0', padding: '10px', borderRadius: '5px', width: '100%' }}>
           {message}
@@ -341,14 +410,12 @@ const CalibratePage = () => {
 // Main App with Tab-based Navigation
 const App = () => {
   const [activeTab, setActiveTab] = useState("home");
-
   const appContainer = {
     fontFamily: 'Arial, sans-serif',
     padding: '20px',
     backgroundColor: '#fff',
     minHeight: '100vh',
   };
-
   return (
     <div style={appContainer}>
       <Navigation activeTab={activeTab} setActiveTab={setActiveTab} />
